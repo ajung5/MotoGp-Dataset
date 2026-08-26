@@ -9,7 +9,7 @@ from openpyxl.utils import get_column_letter
 # CONFIGURATION
 # ============================================================
 
-START_SEASON = 2025
+START_SEASON = 2020
 END_SEASON = 2025
 
 OUTPUT_FILE = (
