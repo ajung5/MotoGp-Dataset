@@ -2,16 +2,20 @@ import requests
 import pandas as pd
 import time
 import re
-from urllib.parse import quote
+from openpyxl.utils import get_column_letter
+
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-START_SEASON = 2025
+START_SEASON = 2021
 END_SEASON = 2025
 
-OUTPUT_FILE = "MotoGP_Historical_Race_Results_2021_2025.xlsx"
+OUTPUT_FILE = (
+    f"MotoGP_Historical_Race_"
+    f"{START_SEASON}_{END_SEASON}.xlsx"
+)
 
 BASE_URL = "https://api.motogp.pulselive.com/motogp/v1"
 
@@ -22,17 +26,16 @@ HEADERS = {
     "Referer": "https://www.motogp.com/"
 }
 
-# Delay antar request agar tidak terlalu agresif
-REQUEST_DELAY = 0.3
+REQUEST_DELAY = 0.5
 
 
 # ============================================================
-# HELPER REQUEST
+# REQUEST FUNCTION
 # ============================================================
 
 def get_json(url, params=None, retries=3):
 
-    for attempt in range(retries):
+    for attempt in range(1, retries + 1):
 
         try:
 
@@ -50,11 +53,11 @@ def get_json(url, params=None, retries=3):
         except requests.exceptions.RequestException as e:
 
             print(
-                f"Request gagal ({attempt + 1}/{retries}): "
-                f"{e}"
+                f"      Request error "
+                f"({attempt}/{retries}): {e}"
             )
 
-            if attempt < retries - 1:
+            if attempt < retries:
                 time.sleep(2)
 
     return None
@@ -73,16 +76,52 @@ def get_season_id(year):
     if not data:
         return None
 
-    for season in data:
+    # API bisa mengembalikan list langsung
+    if isinstance(data, list):
 
-        if int(season.get("year", 0)) == year:
-            return season.get("id")
+        seasons = data
+
+    # atau dictionary
+    elif isinstance(data, dict):
+
+        seasons = (
+            data.get("seasons")
+            or data.get("content")
+            or data.get("results")
+            or []
+        )
+
+    else:
+
+        seasons = []
+
+    for season in seasons:
+
+        try:
+
+            season_year = int(
+                season.get("year")
+            )
+
+        except (
+            ValueError,
+            TypeError
+        ):
+
+            continue
+
+        if season_year == year:
+
+            return (
+                season.get("id")
+                or season.get("uuid")
+            )
 
     return None
 
 
 # ============================================================
-# GET MOTOGP CATEGORY ID
+# GET MOTOGP CATEGORY
 # ============================================================
 
 def get_motogp_category_id(season_uuid):
@@ -93,18 +132,57 @@ def get_motogp_category_id(season_uuid):
         "seasonUuid": season_uuid
     }
 
-    data = get_json(url, params)
+    data = get_json(
+        url,
+        params
+    )
 
     if not data:
         return None
 
-    for category in data:
+    if isinstance(data, list):
 
-        name = category.get("name", "").lower()
+        categories = data
+
+    elif isinstance(data, dict):
+
+        categories = (
+            data.get("categories")
+            or data.get("content")
+            or data.get("results")
+            or []
+        )
+
+    else:
+
+        categories = []
+
+    for category in categories:
+
+        name = str(
+            category.get("name", "")
+        ).lower()
+
+        if name == "motogp":
+
+            return (
+                category.get("id")
+                or category.get("uuid")
+            )
+
+    # fallback
+    for category in categories:
+
+        name = str(
+            category.get("name", "")
+        ).lower()
 
         if "motogp" in name:
 
-            return category.get("id")
+            return (
+                category.get("id")
+                or category.get("uuid")
+            )
 
     return None
 
@@ -122,14 +200,38 @@ def get_events(season_uuid):
         "isFinished": "true"
     }
 
-    return get_json(url, params) or []
+    data = get_json(
+        url,
+        params
+    )
+
+    if not data:
+        return []
+
+    if isinstance(data, list):
+
+        return data
+
+    if isinstance(data, dict):
+
+        return (
+            data.get("events")
+            or data.get("content")
+            or data.get("results")
+            or []
+        )
+
+    return []
 
 
 # ============================================================
 # GET SESSIONS
 # ============================================================
 
-def get_sessions(event_uuid, category_uuid):
+def get_sessions(
+    event_uuid,
+    category_uuid
+):
 
     url = f"{BASE_URL}/results/sessions"
 
@@ -138,18 +240,39 @@ def get_sessions(event_uuid, category_uuid):
         "categoryUuid": category_uuid
     }
 
-    return get_json(url, params) or []
+    data = get_json(
+        url,
+        params
+    )
+
+    if not data:
+        return []
+
+    if isinstance(data, list):
+
+        return data
+
+    if isinstance(data, dict):
+
+        return (
+            data.get("sessions")
+            or data.get("content")
+            or data.get("results")
+            or []
+        )
+
+    return []
 
 
 # ============================================================
-# FIND MAIN RACE SESSION
+# FIND MAIN RACE
 # ============================================================
 
 def find_race_session(sessions):
 
     """
-    Mencari session Race / RAC.
-    
+    Hanya mencari Main Race.
+
     Sprint tidak diambil.
     """
 
@@ -159,7 +282,20 @@ def find_race_session(sessions):
             session.get("type", "")
         ).upper()
 
+        session_name = str(
+            session.get("name", "")
+        ).upper()
+
+        # Main Race biasanya type = RAC
         if session_type == "RAC":
+
+            return session
+
+        # fallback
+        if (
+            session_name == "RACE"
+            or session_name == "MOTOGP™ RACE"
+        ):
 
             return session
 
@@ -170,7 +306,10 @@ def find_race_session(sessions):
 # GET CLASSIFICATION
 # ============================================================
 
-def get_classification(session_id, season):
+def get_classification(
+    session_id,
+    season
+):
 
     url = (
         f"{BASE_URL}/results/session/"
@@ -182,19 +321,38 @@ def get_classification(session_id, season):
         "test": "false"
     }
 
-    data = get_json(url, params)
+    data = get_json(
+        url,
+        params
+    )
 
     if not data:
         return []
 
-    return data.get("classification", [])
+    if isinstance(data, list):
+
+        return data
+
+    if isinstance(data, dict):
+
+        return (
+            data.get("classification")
+            or data.get("classifications")
+            or data.get("content")
+            or []
+        )
+
+    return []
 
 
 # ============================================================
 # GET GRID
 # ============================================================
 
-def get_grid(event_uuid, category_uuid):
+def get_grid(
+    event_uuid,
+    category_uuid
+):
 
     url = (
         f"{BASE_URL}/results/event/"
@@ -204,120 +362,39 @@ def get_grid(event_uuid, category_uuid):
 
     data = get_json(url)
 
-    return data or []
+    if not data:
+        return []
 
+    if isinstance(data, list):
 
-# ============================================================
-# FORMAT GRAND PRIX INITIAL
-# ============================================================
+        return data
 
-def get_gp_initial(event):
-
-    # Coba ambil short_name
-    short_name = event.get("short_name")
-
-    if short_name:
-        return short_name.upper()
-
-    # Coba sponsored name
-    sponsored_name = event.get(
-        "sponsored_name",
-        ""
-    )
-
-    words = sponsored_name.split()
-
-    # Ambil 3 huruf awal sebagai fallback
-    if words:
-        text = re.sub(
-            r"[^A-Za-z]",
-            "",
-            words[-1]
-        )
-
-        return text[:3].upper()
-
-    return ""
-
-
-# ============================================================
-# FORMAT GRAND PRIX NAME
-# ============================================================
-
-def get_grand_prix_name(event):
-
-    name = event.get("name")
-
-    if name:
-        return name
-
-    sponsored = event.get(
-        "sponsored_name"
-    )
-
-    if sponsored:
-        return sponsored
-
-    return ""
-
-
-# ============================================================
-# GET CITY
-# ============================================================
-
-def get_city(event):
-
-    circuit = event.get("circuit") or {}
-
-    # Beberapa response menggunakan locality
-    location = circuit.get("location")
-
-    if location:
-        return location
-
-    locality = circuit.get("locality")
-
-    if locality:
-        return locality
-
-    return ""
-
-
-# ============================================================
-# GET CIRCUIT NAME
-# ============================================================
-
-def get_circuit_name(event):
-
-    circuit = event.get("circuit") or {}
-
-    return (
-        circuit.get("name")
-        or event.get("circuit_name")
-        or ""
-    )
-
-
-# ============================================================
-# GET NATION
-# ============================================================
-
-def get_nation(event):
-
-    country = event.get("country")
-
-    if isinstance(country, dict):
+    if isinstance(data, dict):
 
         return (
-            country.get("name")
-            or country.get("iso")
-            or ""
+            data.get("grid")
+            or data.get("content")
+            or data.get("results")
+            or []
         )
 
-    if isinstance(country, str):
-        return country
+    return []
 
-    return ""
+
+# ============================================================
+# GET RIDER ID
+# ============================================================
+
+def get_rider_id(rider):
+
+    if not rider:
+        return None
+
+    return (
+        rider.get("id")
+        or rider.get("uuid")
+        or rider.get("legacy_id")
+    )
 
 
 # ============================================================
@@ -326,9 +403,17 @@ def get_nation(event):
 
 def get_driver_name(rider):
 
-    return rider.get(
-        "full_name",
-        ""
+    if not rider:
+        return ""
+
+    full_name = (
+        rider.get("full_name")
+        or rider.get("name")
+        or ""
+    )
+
+    return str(
+        full_name
     ).strip()
 
 
@@ -341,7 +426,9 @@ def get_last_name(full_name):
     if not full_name:
         return ""
 
-    return full_name.split()[-1]
+    parts = full_name.split()
+
+    return parts[-1]
 
 
 # ============================================================
@@ -356,17 +443,53 @@ def get_driver_initial(full_name):
     parts = full_name.split()
 
     if len(parts) == 1:
+
         return parts[0][0].upper()
 
-    # Format: FN
     return (
-        parts[0][0] +
-        parts[-1][0]
+        parts[0][0]
+        + parts[-1][0]
     ).upper()
 
 
 # ============================================================
-# GRID DICTIONARY
+# GET GRID POSITION
+# ============================================================
+
+def get_grid_position(item):
+
+    possible_fields = [
+
+        "grid_position",
+        "gridPosition",
+        "position",
+        "qualifying_position",
+        "qualifyingPosition"
+
+    ]
+
+    for field in possible_fields:
+
+        value = item.get(field)
+
+        if value is not None:
+
+            try:
+
+                return int(value)
+
+            except (
+                ValueError,
+                TypeError
+            ):
+
+                pass
+
+    return None
+
+
+# ============================================================
+# CREATE GRID DICTIONARY
 # ============================================================
 
 def create_grid_dictionary(grid_data):
@@ -375,45 +498,602 @@ def create_grid_dictionary(grid_data):
 
     for item in grid_data:
 
-        rider = item.get("rider") or {}
+        rider = (
+            item.get("rider")
+            or {}
+        )
 
-        rider_id = (
-            rider.get("id")
-            or rider.get("legacy_id")
+        rider_id = get_rider_id(
+            rider
         )
 
         if rider_id is None:
             continue
 
-        grid_position = item.get(
-            "qualifying_position"
+        grid_position = (
+            get_grid_position(item)
         )
 
-        grid_dict[str(rider_id)] = grid_position
+        if grid_position is not None:
+
+            grid_dict[
+                str(rider_id)
+            ] = grid_position
 
     return grid_dict
 
 
 # ============================================================
-# MAIN SCRAPER
+# GET CLASSIFICATION POSITION
+# ============================================================
+
+def get_classification_position(
+    result
+):
+
+    """
+    Mengambil posisi klasifikasi resmi.
+
+    Prioritas:
+    1. position
+    2. classification_position
+    3. classificationPosition
+    4. rank
+    5. position_number
+
+    DNF / NC / DSQ tetap menggunakan
+    posisi klasifikasi apabila API menyediakannya.
+    """
+
+    possible_fields = [
+
+        "position",
+
+        "classification_position",
+
+        "classificationPosition",
+
+        "rank",
+
+        "position_number",
+
+        "positionNumber"
+
+    ]
+
+    for field in possible_fields:
+
+        value = result.get(field)
+
+        if value is None:
+            continue
+
+        try:
+
+            position = int(value)
+
+            if position > 0:
+                return position
+
+        except (
+            ValueError,
+            TypeError
+        ):
+
+            continue
+
+    return None
+
+
+# ============================================================
+# ASSIGN FINISH POSITION
+# ============================================================
+
+def assign_finish_positions(
+    classification
+):
+
+    """
+    Mempertahankan posisi resmi dari API.
+
+    Jika posisi kosong, posisi akan diisi
+    berdasarkan urutan classification sebagai
+    fallback.
+
+    Ini membuat DNF/NC tetap memiliki
+    Finish Position numerik apabila API
+    tidak memberikan position secara langsung.
+    """
+
+    # --------------------------------------------------------
+    # Ambil posisi resmi yang tersedia
+    # --------------------------------------------------------
+
+    used_positions = set()
+
+    for result in classification:
+
+        position = (
+            get_classification_position(
+                result
+            )
+        )
+
+        if position is not None:
+
+            result[
+                "_official_finish_position"
+            ] = position
+
+            used_positions.add(
+                position
+            )
+
+        else:
+
+            result[
+                "_official_finish_position"
+            ] = None
+
+    # --------------------------------------------------------
+    # Fallback untuk position kosong
+    # --------------------------------------------------------
+
+    next_position = 1
+
+    for result in classification:
+
+        current_position = result.get(
+            "_official_finish_position"
+        )
+
+        if current_position is not None:
+            continue
+
+        while (
+            next_position
+            in used_positions
+        ):
+
+            next_position += 1
+
+        result[
+            "_official_finish_position"
+        ] = next_position
+
+        used_positions.add(
+            next_position
+        )
+
+        next_position += 1
+
+    return classification
+
+
+# ============================================================
+# PARSE LAP TIME
+# ============================================================
+
+def parse_lap_time(
+    lap_time
+):
+
+    if lap_time is None:
+        return None
+
+    lap_time = str(
+        lap_time
+    ).strip()
+
+    if not lap_time:
+        return None
+
+    try:
+
+        parts = lap_time.split(":")
+
+        # MM:SS.mmm
+        if len(parts) == 2:
+
+            minutes = float(
+                parts[0]
+            )
+
+            seconds = float(
+                parts[1]
+            )
+
+            return (
+                minutes * 60000
+                + seconds * 1000
+            )
+
+        # HH:MM:SS.mmm
+        if len(parts) == 3:
+
+            hours = float(
+                parts[0]
+            )
+
+            minutes = float(
+                parts[1]
+            )
+
+            seconds = float(
+                parts[2]
+            )
+
+            return (
+                hours * 3600000
+                + minutes * 60000
+                + seconds * 1000
+            )
+
+    except (
+        ValueError,
+        TypeError
+    ):
+
+        return None
+
+    return None
+
+
+# ============================================================
+# GET BEST LAP
+# ============================================================
+
+def get_best_lap_time(result):
+
+    best_lap = (
+        result.get("best_lap")
+        or result.get("bestLap")
+        or {}
+    )
+
+    if isinstance(
+        best_lap,
+        dict
+    ):
+
+        return (
+            best_lap.get("time")
+            or best_lap.get("lap_time")
+            or best_lap.get("lapTime")
+        )
+
+    if isinstance(
+        best_lap,
+        str
+    ):
+
+        return best_lap
+
+    return None
+
+
+# ============================================================
+# FIND FASTEST LAP
+# ============================================================
+
+def find_fastest_lap_rider(
+    classification
+):
+
+    fastest_rider_id = None
+
+    fastest_time_ms = None
+
+    for result in classification:
+
+        rider = (
+            result.get("rider")
+            or {}
+        )
+
+        rider_id = get_rider_id(
+            rider
+        )
+
+        if rider_id is None:
+            continue
+
+        lap_time = (
+            get_best_lap_time(
+                result
+            )
+        )
+
+        lap_time_ms = (
+            parse_lap_time(
+                lap_time
+            )
+        )
+
+        if lap_time_ms is None:
+            continue
+
+        if (
+            fastest_time_ms is None
+            or lap_time_ms
+            < fastest_time_ms
+        ):
+
+            fastest_time_ms = (
+                lap_time_ms
+            )
+
+            fastest_rider_id = (
+                rider_id
+            )
+
+    return fastest_rider_id
+
+
+# ============================================================
+# GRAND PRIX NAME
+# ============================================================
+
+def get_grand_prix_name(event):
+
+    possible_fields = [
+
+        "name",
+
+        "sponsored_name",
+
+        "sponsoredName",
+
+        "event_name",
+
+        "eventName"
+
+    ]
+
+    for field in possible_fields:
+
+        value = event.get(field)
+
+        if value:
+
+            return str(
+                value
+            ).strip()
+
+    return ""
+
+
+# ============================================================
+# CIRCUIT NAME
+# ============================================================
+
+def get_circuit_name(event):
+
+    circuit = (
+        event.get("circuit")
+        or {}
+    )
+
+    if isinstance(
+        circuit,
+        dict
+    ):
+
+        return (
+            circuit.get("name")
+            or circuit.get("circuit_name")
+            or circuit.get("circuitName")
+            or ""
+        )
+
+    return (
+        event.get("circuit_name")
+        or event.get("circuitName")
+        or ""
+    )
+
+
+# ============================================================
+# CITY
+# ============================================================
+
+def get_city(event):
+
+    circuit = (
+        event.get("circuit")
+        or {}
+    )
+
+    if isinstance(
+        circuit,
+        dict
+    ):
+
+        return (
+            circuit.get("location")
+            or circuit.get("locality")
+            or circuit.get("city")
+            or ""
+        )
+
+    return (
+        event.get("city")
+        or event.get("location")
+        or ""
+    )
+
+
+# ============================================================
+# NATION
+# ============================================================
+
+def get_nation(event):
+
+    country = event.get(
+        "country"
+    )
+
+    if isinstance(
+        country,
+        dict
+    ):
+
+        return (
+            country.get("name")
+            or country.get("iso")
+            or country.get("code")
+            or ""
+        )
+
+    if country:
+
+        return str(
+            country
+        )
+
+    return (
+        event.get("nation")
+        or event.get("country_name")
+        or ""
+    )
+
+
+# ============================================================
+# GP INITIAL
+# ============================================================
+
+def get_gp_initial(event):
+
+    possible_fields = [
+
+        "short_name",
+
+        "shortName",
+
+        "code",
+
+        "event_code",
+
+        "eventCode"
+
+    ]
+
+    for field in possible_fields:
+
+        value = event.get(field)
+
+        if value:
+
+            return str(
+                value
+            ).upper()
+
+    gp_name = get_grand_prix_name(
+        event
+    )
+
+    if not gp_name:
+        return ""
+
+    # Hapus kata umum
+    gp_name_clean = re.sub(
+        r"\b(GP|GRAND PRIX)\b",
+        "",
+        gp_name,
+        flags=re.IGNORECASE
+    ).strip()
+
+    words = (
+        gp_name_clean.split()
+    )
+
+    if not words:
+        return ""
+
+    # Ambil 3 huruf pertama dari
+    # kata utama terakhir
+    last_word = re.sub(
+        r"[^A-Za-z]",
+        "",
+        words[-1]
+    )
+
+    return (
+        last_word[:3]
+        .upper()
+    )
+
+
+# ============================================================
+# GET RACE POINTS
+# ============================================================
+
+def get_race_points(result):
+
+    possible_fields = [
+
+        "points",
+
+        "race_points",
+
+        "racePoints",
+
+        "points_scored",
+
+        "pointsScored"
+
+    ]
+
+    for field in possible_fields:
+
+        value = result.get(field)
+
+        if value is not None:
+
+            try:
+
+                return float(value)
+
+            except (
+                ValueError,
+                TypeError
+            ):
+
+                pass
+
+    return 0
+
+
+# ============================================================
+# MAIN PROGRAM
 # ============================================================
 
 all_results = []
 
-print("=" * 70)
-print("MOTOGP HISTORICAL RACE DATA SCRAPER")
-print("=" * 70)
+
+print()
+print("=" * 75)
+print("        MOTOGP HISTORICAL RACE DATA SCRAPER")
+print("=" * 75)
 
 print(
-    f"Season : {START_SEASON} - {END_SEASON}"
+    f"Season       : {START_SEASON} - {END_SEASON}"
 )
 
 print(
-    f"Output : {OUTPUT_FILE}"
+    "Race Type    : Main Race"
 )
 
-print("=" * 70)
+print(
+    f"Output       : {OUTPUT_FILE}"
+)
 
+print("=" * 75)
+
+
+# ============================================================
+# LOOP SEASON
+# ============================================================
 
 for season in range(
     START_SEASON,
@@ -421,20 +1101,27 @@ for season in range(
 ):
 
     print()
-    print("=" * 70)
-    print(f"SEASON {season}")
-    print("=" * 70)
+    print("-" * 75)
+    print(
+        f"SEASON {season}"
+    )
+    print("-" * 75)
 
     # --------------------------------------------------------
     # SEASON ID
     # --------------------------------------------------------
 
-    season_uuid = get_season_id(season)
+    season_uuid = (
+        get_season_id(
+            season
+        )
+    )
 
     if not season_uuid:
 
         print(
-            f"[WARNING] Season {season} tidak ditemukan."
+            f"[ERROR] Season {season} "
+            f"tidak ditemukan."
         )
 
         continue
@@ -443,73 +1130,105 @@ for season in range(
         f"Season UUID : {season_uuid}"
     )
 
+    time.sleep(
+        REQUEST_DELAY
+    )
+
     # --------------------------------------------------------
-    # CATEGORY
+    # MOTOGP CATEGORY
     # --------------------------------------------------------
 
-    category_uuid = get_motogp_category_id(
-        season_uuid
+    category_uuid = (
+        get_motogp_category_id(
+            season_uuid
+        )
     )
 
     if not category_uuid:
 
         print(
-            "[WARNING] Category MotoGP tidak ditemukan."
+            "[ERROR] Category MotoGP "
+            "tidak ditemukan."
         )
 
         continue
 
     print(
-        f"MotoGP Category UUID : {category_uuid}"
+        f"Category UUID : {category_uuid}"
+    )
+
+    time.sleep(
+        REQUEST_DELAY
     )
 
     # --------------------------------------------------------
     # EVENTS
     # --------------------------------------------------------
 
-    events = get_events(
-        season_uuid
+    events = (
+        get_events(
+            season_uuid
+        )
     )
+
+    if not events:
+
+        print(
+            "[ERROR] Event tidak ditemukan."
+        )
+
+        continue
 
     print(
         f"Total Event : {len(events)}"
     )
 
-    # Sort berdasarkan tanggal
+    # --------------------------------------------------------
+    # SORT EVENT
+    # --------------------------------------------------------
+
     events = sorted(
         events,
         key=lambda x: (
             x.get("date")
             or x.get("event_date")
+            or x.get("eventDate")
             or ""
         )
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # LOOP EVENT
-    # --------------------------------------------------------
+    # ========================================================
 
     for round_number, event in enumerate(
         events,
         start=1
     ):
 
-        event_uuid = event.get("id")
+        event_uuid = (
+            event.get("id")
+            or event.get("uuid")
+        )
 
         if not event_uuid:
+
             continue
 
-        gp_name = get_grand_prix_name(
-            event
+        gp_name = (
+            get_grand_prix_name(
+                event
+            )
         )
 
         print()
         print(
-            f"[{season}] Round {round_number} - {gp_name}"
+            f"Round {round_number:02d} "
+            f"| {gp_name}"
         )
 
         # ----------------------------------------------------
-        # SESSION
+        # SESSIONS
         # ----------------------------------------------------
 
         sessions = get_sessions(
@@ -517,26 +1236,46 @@ for season in range(
             category_uuid
         )
 
-        time.sleep(REQUEST_DELAY)
+        time.sleep(
+            REQUEST_DELAY
+        )
 
-        race_session = find_race_session(
-            sessions
+        if not sessions:
+
+            print(
+                "  [SKIP] Session kosong."
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # FIND MAIN RACE
+        # ----------------------------------------------------
+
+        race_session = (
+            find_race_session(
+                sessions
+            )
         )
 
         if not race_session:
 
             print(
-                "  [SKIP] Main Race tidak ditemukan."
+                "  [SKIP] Main Race "
+                "tidak ditemukan."
             )
 
             continue
 
-        session_id = race_session.get("id")
+        session_id = (
+            race_session.get("id")
+            or race_session.get("uuid")
+        )
 
         if not session_id:
 
             print(
-                "  [SKIP] Session ID tidak ditemukan."
+                "  [SKIP] Session ID kosong."
             )
 
             continue
@@ -549,12 +1288,16 @@ for season in range(
         # CLASSIFICATION
         # ----------------------------------------------------
 
-        classification = get_classification(
-            session_id,
-            season
+        classification = (
+            get_classification(
+                session_id,
+                season
+            )
         )
 
-        time.sleep(REQUEST_DELAY)
+        time.sleep(
+            REQUEST_DELAY
+        )
 
         if not classification:
 
@@ -564,8 +1307,14 @@ for season in range(
 
             continue
 
-        print(
-            f"  Riders : {len(classification)}"
+        # ----------------------------------------------------
+        # ASSIGN FINISH POSITION
+        # ----------------------------------------------------
+
+        classification = (
+            assign_finish_positions(
+                classification
+            )
         )
 
         # ----------------------------------------------------
@@ -577,116 +1326,57 @@ for season in range(
             category_uuid
         )
 
-        time.sleep(REQUEST_DELAY)
+        time.sleep(
+            REQUEST_DELAY
+        )
 
-        grid_dict = create_grid_dictionary(
-            grid_data
+        grid_dict = (
+            create_grid_dictionary(
+                grid_data
+            )
         )
 
         # ----------------------------------------------------
-        # FIND FASTEST LAP
+        # FASTEST LAP
         # ----------------------------------------------------
 
-        fastest_lap_rider_id = None
-
-        fastest_lap_time = None
-
-        for result in classification:
-
-            rider = result.get(
-                "rider"
-            ) or {}
-
-            rider_id = (
-                rider.get("id")
-                or rider.get("legacy_id")
+        fastest_lap_rider_id = (
+            find_fastest_lap_rider(
+                classification
             )
-
-            best_lap = (
-                result.get("best_lap")
-                or {}
-            )
-
-            lap_time = best_lap.get(
-                "time"
-            )
-
-            if not lap_time:
-                continue
-
-            # Convert time menjadi milidetik
-            try:
-
-                parts = lap_time.split(":")
-
-                if len(parts) == 3:
-
-                    minutes = float(parts[0])
-
-                    seconds = float(parts[1])
-
-                    milliseconds = float(
-                        parts[2]
-                    )
-
-                    total_ms = (
-                        minutes * 60000
-                        + seconds * 1000
-                        + milliseconds
-                    )
-
-                elif len(parts) == 2:
-
-                    minutes = float(parts[0])
-
-                    seconds = float(parts[1])
-
-                    total_ms = (
-                        minutes * 60000
-                        + seconds * 1000
-                    )
-
-                else:
-
-                    continue
-
-            except Exception:
-                continue
-
-            if (
-                fastest_lap_time is None
-                or total_ms < fastest_lap_time
-            ):
-
-                fastest_lap_time = total_ms
-
-                fastest_lap_rider_id = (
-                    rider_id
-                )
+        )
 
         # ----------------------------------------------------
         # EVENT INFORMATION
         # ----------------------------------------------------
 
-        circuit_name = get_circuit_name(
-            event
+        circuit_name = (
+            get_circuit_name(
+                event
+            )
         )
 
-        city = get_city(
-            event
+        city = (
+            get_city(
+                event
+            )
         )
 
-        nation = get_nation(
-            event
+        nation = (
+            get_nation(
+                event
+            )
         )
 
-        gp_initial = get_gp_initial(
-            event
+        gp_initial = (
+            get_gp_initial(
+                event
+            )
         )
 
-        # ----------------------------------------------------
-        # CREATE ROW
-        # ----------------------------------------------------
+        # ====================================================
+        # LOOP DRIVER
+        # ====================================================
 
         for result in classification:
 
@@ -695,63 +1385,77 @@ for season in range(
                 or {}
             )
 
-            rider_id = (
-                rider.get("id")
-                or rider.get("legacy_id")
-            )
-
-            rider_name = get_driver_name(
+            rider_id = get_rider_id(
                 rider
             )
 
-            last_name = get_last_name(
-                rider_name
+            # ------------------------------------------------
+            # DRIVER
+            # ------------------------------------------------
+
+            driver_name = (
+                get_driver_name(
+                    rider
+                )
+            )
+
+            last_name = (
+                get_last_name(
+                    driver_name
+                )
             )
 
             driver_initial = (
                 get_driver_initial(
-                    rider_name
+                    driver_name
                 )
             )
 
-            # ----------------------------------------------
-            # GRID POSITION
-            # ----------------------------------------------
+            # ------------------------------------------------
+            # GRID
+            # ------------------------------------------------
 
-            grid_position = grid_dict.get(
-                str(rider_id)
-            )
+            grid_position = None
 
-            # ----------------------------------------------
+            if rider_id is not None:
+
+                grid_position = (
+                    grid_dict.get(
+                        str(rider_id)
+                    )
+                )
+
+            # ------------------------------------------------
             # FINISH POSITION
-            # ----------------------------------------------
+            # ------------------------------------------------
 
-            finish_position = result.get(
-                "position"
+            finish_position = (
+                result.get(
+                    "_official_finish_position"
+                )
             )
 
-            # ----------------------------------------------
+            # ------------------------------------------------
             # RACE POINTS
-            # ----------------------------------------------
+            # ------------------------------------------------
 
-            race_points = result.get(
-                "points"
+            race_points = (
+                get_race_points(
+                    result
+                )
             )
 
-            # Jika API tidak menyediakan points
-            # pada classification, default 0.
-            if race_points is None:
-                race_points = 0
-
-            # ----------------------------------------------
-            # FASTEST LAP FLAG
-            # ----------------------------------------------
+            # ------------------------------------------------
+            # FASTEST LAP
+            # ------------------------------------------------
 
             if (
                 rider_id is not None
                 and fastest_lap_rider_id is not None
                 and str(rider_id)
-                == str(fastest_lap_rider_id)
+                == str(
+                    fastest_lap_rider_id
+                )
             ):
 
                 fastest_lap = 1
@@ -760,9 +1464,9 @@ for season in range(
 
                 fastest_lap = 0
 
-            # ----------------------------------------------
-            # APPEND
-            # ----------------------------------------------
+            # ------------------------------------------------
+            # CREATE ROW
+            # ------------------------------------------------
 
             row = {
 
@@ -773,7 +1477,11 @@ for season in range(
                     season,
 
                 "IsLatestSeason":
-                    1 if season == END_SEASON else 0,
+                    (
+                        1
+                        if season == END_SEASON
+                        else 0
+                    ),
 
                 "Grand Prix":
                     gp_name,
@@ -794,7 +1502,7 @@ for season in range(
                     "Main Race",
 
                 "Driver Name":
-                    rider_name,
+                    driver_name,
 
                 "Last Name":
                     last_name,
@@ -819,43 +1527,30 @@ for season in range(
                 row
             )
 
+        print(
+            f"  Drivers       : "
+            f"{len(classification)}"
+        )
+
+        print(
+            f"  Fastest Lap   : "
+            f"{fastest_lap_rider_id}"
+        )
+
 
 # ============================================================
 # CREATE DATAFRAME
 # ============================================================
 
 print()
-print("=" * 70)
+print("=" * 75)
 print("MEMBUAT DATAFRAME")
-print("=" * 70)
+print("=" * 75)
+
 
 df = pd.DataFrame(
     all_results
 )
-
-
-# ============================================================
-# SORTING
-# ============================================================
-
-if not df.empty:
-
-    df = df.sort_values(
-        by=[
-            "Season",
-            "Round",
-            "Finish Position"
-        ],
-        ascending=[
-            True,
-            True,
-            True
-        ]
-    )
-
-    df = df.reset_index(
-        drop=True
-    )
 
 
 # ============================================================
@@ -883,17 +1578,108 @@ columns = [
 
 ]
 
-df = df[columns]
+if not df.empty:
+
+    df = df[columns]
 
 
 # ============================================================
-# SAVE TO EXCEL
+# DATA CLEANING
+# ============================================================
+
+if not df.empty:
+
+    # Round
+    df["Round"] = pd.to_numeric(
+        df["Round"],
+        errors="coerce"
+    ).astype("Int64")
+
+    # Season
+    df["Season"] = pd.to_numeric(
+        df["Season"],
+        errors="coerce"
+    ).astype("Int64")
+
+    # IsLatestSeason
+    df["IsLatestSeason"] = (
+        pd.to_numeric(
+            df["IsLatestSeason"],
+            errors="coerce"
+        )
+        .fillna(0)
+        .astype(int)
+    )
+
+    # Grid
+    df["Grid Position"] = (
+        pd.to_numeric(
+            df["Grid Position"],
+            errors="coerce"
+        )
+        .astype("Int64")
+    )
+
+    # Finish
+    df["Finish Position"] = (
+        pd.to_numeric(
+            df["Finish Position"],
+            errors="coerce"
+        )
+        .astype("Int64")
+    )
+
+    # Points
+    df["Race Points"] = (
+        pd.to_numeric(
+            df["Race Points"],
+            errors="coerce"
+        )
+        .fillna(0)
+    )
+
+    # Fastest Lap
+    df["Fastest Lap"] = (
+        pd.to_numeric(
+            df["Fastest Lap"],
+            errors="coerce"
+        )
+        .fillna(0)
+        .astype(int)
+    )
+
+    # --------------------------------------------------------
+    # SORT
+    # --------------------------------------------------------
+
+    df = df.sort_values(
+        by=[
+            "Season",
+            "Round",
+            "Finish Position"
+        ],
+        ascending=[
+            True,
+            True,
+            True
+        ],
+        na_position="last"
+    )
+
+    df = df.reset_index(
+        drop=True
+    )
+
+
+# ============================================================
+# SAVE EXCEL
 # ============================================================
 
 print()
-print("=" * 70)
-print("SAVE EXCEL")
-print("=" * 70)
+print("=" * 75)
+print("MENYIMPAN EXCEL")
+print("=" * 75)
+
 
 with pd.ExcelWriter(
     OUTPUT_FILE,
@@ -911,39 +1697,6 @@ with pd.ExcelWriter(
     ]
 
     # --------------------------------------------------------
-    # AUTO WIDTH
-    # --------------------------------------------------------
-
-    for column_cells in worksheet.columns:
-
-        max_length = 0
-
-        column_letter = (
-            column_cells[0].column_letter
-        )
-
-        for cell in column_cells:
-
-            try:
-
-                cell_length = len(
-                    str(cell.value)
-                )
-
-                if cell_length > max_length:
-                    max_length = cell_length
-
-            except Exception:
-                pass
-
-        worksheet.column_dimensions[
-            column_letter
-        ].width = min(
-            max_length + 2,
-            35
-        )
-
-    # --------------------------------------------------------
     # FREEZE HEADER
     # --------------------------------------------------------
 
@@ -953,9 +1706,54 @@ with pd.ExcelWriter(
     # AUTO FILTER
     # --------------------------------------------------------
 
-    worksheet.auto_filter.ref = (
-        worksheet.dimensions
-    )
+    if worksheet.max_row > 1:
+
+        worksheet.auto_filter.ref = (
+            worksheet.dimensions
+        )
+
+    # --------------------------------------------------------
+    # AUTO WIDTH
+    # --------------------------------------------------------
+
+    for column_cells in worksheet.columns:
+
+        max_length = 0
+
+        column_index = (
+            column_cells[0].column
+        )
+
+        column_letter = (
+            get_column_letter(
+                column_index
+            )
+        )
+
+        for cell in column_cells:
+
+            try:
+
+                value = str(
+                    cell.value
+                )
+
+                if len(value) > max_length:
+
+                    max_length = len(
+                        value
+                    )
+
+            except Exception:
+
+                pass
+
+        worksheet.column_dimensions[
+            column_letter
+        ].width = min(
+            max_length + 2,
+            35
+        )
 
 
 # ============================================================
@@ -963,21 +1761,46 @@ with pd.ExcelWriter(
 # ============================================================
 
 print()
-print("=" * 70)
+print("=" * 75)
 print("SELESAI")
-print("=" * 70)
+print("=" * 75)
 
 print(
-    f"Total Rows : {len(df):,}"
+    f"Total Row        : {len(df):,}"
+)
+
+if not df.empty:
+
+    total_races = (
+        df[
+            [
+                "Season",
+                "Round"
+            ]
+        ]
+        .drop_duplicates()
+        .shape[0]
+    )
+
+    total_drivers = (
+        df["Driver Name"]
+        .nunique()
+    )
+
+    print(
+        f"Total Race       : {total_races:,}"
+    )
+
+    print(
+        f"Total Driver     : {total_drivers:,}"
+    )
+
+print(
+    f"Output File      : {OUTPUT_FILE}"
 )
 
 print(
-    f"Total Race : "
-    f"{df[['Season', 'Round']].drop_duplicates().shape[0]:,}"
+    "Sheet            : Driver"
 )
 
-print(
-    f"File      : {OUTPUT_FILE}"
-)
-
-print("=" * 70)
+print("=" * 75)
